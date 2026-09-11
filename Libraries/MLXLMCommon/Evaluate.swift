@@ -1825,9 +1825,15 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
     let iterator = SendableBox(iterator)
     let handler = SendableBox(handler)
 
-    // Launch a Task to perform iteration asynchronously.
+    // Keep task cancellation and task-local values while moving blocking MLX work
+    // onto a separate queue for each generation (fidarix cherry-pick of upstream
+    // PR #611, "Fix generation loop blocking Swift cooperative workers" — adapted
+    // to this 3.31.4-based tree, which lacks the tokenCollector parameter/
+    // performIteration return value present on the upstream main branch at the
+    // time of that PR).
     let task = Task {
-        let performIteration = {
+        let worker = GenerationWorker()
+        let performIteration = { @Sendable in
             var iterator = iterator.consume()
             var handler = handler.consume()
 
@@ -1926,10 +1932,10 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
 
         if let ticket = wiredMemoryTicket {
             await WiredMemoryTicket.withWiredLimit(ticket) {
-                performIteration()
+                await worker.run(performIteration)
             }
         } else {
-            performIteration()
+            await worker.run(performIteration)
         }
     }
 
@@ -2136,7 +2142,7 @@ private enum TokenLoopDisposition {
     case cancelled
 }
 
-private protocol TokenLoopHandler {
+private protocol TokenLoopHandler: SendableMetatype {
     associatedtype Output
 
     /// Return `.stop` for semantic generation stops, or `.cancelled` for consumer termination.
