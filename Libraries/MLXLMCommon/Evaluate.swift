@@ -1845,9 +1845,11 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
     let iterator = SendableBox(iterator)
     let handler = SendableBox(handler)
 
-    // Launch a Task to perform iteration asynchronously.
+    // Keep task cancellation and task-local values while moving blocking MLX work
+    // onto a separate queue for each generation.
     let task = Task {
-        let performIteration = {
+        let worker = GenerationWorker()
+        let performIteration = { @Sendable in
             var iterator = iterator.consume()
             var handler = handler.consume()
 
@@ -1948,11 +1950,11 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
         }
 
         if let ticket = wiredMemoryTicket {
-            await WiredMemoryTicket.withWiredLimit(ticket) {
-                performIteration()
+            return await WiredMemoryTicket.withWiredLimit(ticket) {
+                await worker.run(performIteration)
             }
         } else {
-            performIteration()
+            return await worker.run(performIteration)
         }
     }
 
@@ -2159,7 +2161,7 @@ private enum TokenLoopDisposition {
     case cancelled
 }
 
-private protocol TokenLoopHandler {
+private protocol TokenLoopHandler: SendableMetatype {
     associatedtype Output
 
     /// Return `.stop` for semantic generation stops, or `.cancelled` for consumer termination.
