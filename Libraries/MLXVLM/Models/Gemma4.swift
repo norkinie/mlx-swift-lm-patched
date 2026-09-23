@@ -2084,18 +2084,63 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
     {
         let convertedCache = cache.map { $0 }
         if let imagePixels = input.image?.pixels {
-            let (inputsEmbeds, perLayerInputs) = try getInputEmbeddings(
+            // Fidarix-Patch (Feature 085): stellt das windowSize-Chunking
+            // wieder her, das PR #337 (upstream mlx-swift-lm) ursprünglich
+            // für genau diesen Bild-Zweig eingeführt hatte, aber durch PR
+            // #327 ("Add Gemma 4 12B unified") versehentlich wieder auf
+            // einen einzigen, ungechunkten languageModel()-Aufruf mit dem
+            // vollen Embeddings-Tensor zurückgesetzt wurde — verifiziert
+            // per Commit-Historie, besteht bis heute auch im
+            // ml-explore/mlx-swift-lm-main-Branch. Ohne Chunking wird der
+            // komplette Bild+Text-Prompt in einem Schritt materialisiert,
+            // was auf iPhones zu einem deutlich höheren Speicher-Peak
+            // während des Prefills führt als nötig (siehe
+            // specs/085-fix-scan-crop-hang/research.md Entscheidung 2).
+            //
+            // Anders als im ursprünglichen PR-#337-Diff muss hier
+            // zusätzlich `tokenTypeIds` pro Chunk konsistent mitgesliced
+            // werden (2D, gleiche Sequenzdimension wie inputsEmbeds/
+            // perLayerInputs) — dieser Parameter existierte zum Zeitpunkt
+            // von PR #337 in dieser Funktion noch nicht (kam erst mit der
+            // MTP-/Bidirectional-Vision-Attention-Maskenlogik dazu, siehe
+            // callAsFunction oben). Ohne konsistentes Slicing würde die
+            // Attention-Maske pro Chunk-Aufruf falsch relativ zur jeweils
+            // übergebenen Sequenzlänge berechnet.
+            let (allEmbeds, allPerLayerInputs) = try getInputEmbeddings(
                 inputIds: input.text.tokens, pixelValues: imagePixels)
+            let allTokenTypeIds = gemma4TokenTypeIds(
+                inputIds: input.text.tokens,
+                imageTokenId: config.imageTokenId,
+                videoTokenId: nil,
+                audioTokenId: config.audioTokenId)
+
+            let prefillStepSize = max(windowSize ?? 512, 1)
+            let totalPositions = allEmbeds.dim(1)
+            var processed = 0
+            while totalPositions - processed > 1 {
+                let chunkLength = min(prefillStepSize, totalPositions - processed - 1)
+                let range = processed ..< (processed + chunkLength)
+                _ = languageModel(
+                    nil,
+                    cache: convertedCache,
+                    inputsEmbeds: allEmbeds[0..., range, 0...],
+                    perLayerInputs: allPerLayerInputs.map { $0[0..., range, 0..., 0...] },
+                    tokenTypeIds: allTokenTypeIds[0..., range]
+                )
+                asyncEval(cache)
+                processed += chunkLength
+            }
+            // Einmaliges Sync nach der Schleife, um noch ausstehende
+            // asynchrone Auswertungen abzuschließen, bevor der letzte
+            // (finale, Logits liefernde) Chunk-Aufruf erfolgt — identisch
+            // zum bestehenden Muster in gemma4PrepareTextOnly() unten.
+            eval(cache)
             let result = languageModel(
                 nil,
                 cache: convertedCache,
-                inputsEmbeds: inputsEmbeds,
-                perLayerInputs: perLayerInputs,
-                tokenTypeIds: gemma4TokenTypeIds(
-                    inputIds: input.text.tokens,
-                    imageTokenId: config.imageTokenId,
-                    videoTokenId: nil,
-                    audioTokenId: config.audioTokenId)
+                inputsEmbeds: allEmbeds[0..., processed..., 0...],
+                perLayerInputs: allPerLayerInputs.map { $0[0..., processed..., 0..., 0...] },
+                tokenTypeIds: allTokenTypeIds[0..., processed...]
             )
             return .logits(result)
         } else {
