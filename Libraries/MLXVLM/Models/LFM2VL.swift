@@ -696,8 +696,47 @@ public struct LFM2VLProcessor: UserInputProcessor {
         let patchSize = config.encoderPatchSize
 
         // Calculate number of tiles
-        let numTilesH = max(1, min(config.maxTiles, Int(ceil(Double(height) / Double(tileSize)))))
-        let numTilesW = max(1, min(config.maxTiles, Int(ceil(Double(width) / Double(tileSize)))))
+        var numTilesH = max(1, min(config.maxTiles, Int(ceil(Double(height) / Double(tileSize)))))
+        var numTilesW = max(1, min(config.maxTiles, Int(ceil(Double(width) / Double(tileSize)))))
+
+        // Bugfix (Feature 086-Nachtrag, Fidarix): config.maxTiles caps EACH
+        // axis independently, but does nothing to bound the combined image
+        // token count the two axes produce together. An extreme aspect
+        // ratio (e.g. a 3213×5712 portrait photo) can still pass both
+        // per-axis caps individually while the resulting patch grid — and
+        // therefore the number of <image> placeholder tokens generated
+        // below — vastly exceeds config.maxImageTokens (measured: 17,920
+        // tokens against a declared max_image_tokens of 256). config
+        // already carries maxImageTokens/minImageTokens/minTiles from
+        // processor_config.json, but nothing in this port previously read
+        // them — the model then aborts generation with a token/feature
+        // count mismatch (reproducible SIGTRAP on the Fidarix test device).
+        // Shrinks both axes together (preserving their aspect ratio, not
+        // independently truncating one) until the post-downsample token
+        // budget fits, floored at minTiles per axis so at least a minimal
+        // tiled view survives.
+        //
+        // NOTE: at minTiles=2 (this model's declared floor) the achievable
+        // token count (1,024) still exceeds the declared maxImageTokens
+        // (256) — those two config values appear to target different code
+        // paths in the reference HF processor (max_image_tokens/
+        // min_image_tokens likely apply to a non-tiled resize path, while
+        // max_num_patches=1024 governs the tiled path used here; both give
+        // the same practical floor for this model at minTiles=2). Using
+        // maxImageTokens as the loop's stopping condition still drives the
+        // reduction as far down as minTiles allows, which is what matters
+        // for avoiding the crash — a precise distinction between the two
+        // config fields isn't needed for that.
+        let patchesPerTileH0 = tileSize / patchSize
+        let patchesPerTileW0 = tileSize / patchSize
+        let downsampleFactor0 = config.downsampleFactor
+        while numTilesH > config.minTiles || numTilesW > config.minTiles {
+            let tokens = (numTilesH * patchesPerTileH0 / downsampleFactor0)
+                * (numTilesW * patchesPerTileW0 / downsampleFactor0)
+            if tokens <= config.maxImageTokens { break }
+            if numTilesH > config.minTiles { numTilesH -= 1 }
+            if numTilesW > config.minTiles && numTilesW > numTilesH { numTilesW -= 1 }
+        }
 
         // Calculate actual resize dimensions
         let resizedHeight = numTilesH * tileSize
