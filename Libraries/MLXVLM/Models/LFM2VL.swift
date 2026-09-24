@@ -1323,6 +1323,13 @@ public struct LFM2VLProcessorConfiguration: Codable, Sendable {
     private let _encoderPatchSize: Int?
     private let _maxTiles: Int?
     private let _downsampleFactor: Int?
+    // Bugfix (Feature 086-Nachtrag, Fidarix): added so
+    // splitIntoPatchesAndPreprocess() can bound the combined image token
+    // count for extreme aspect ratios — see the fix at its call site for
+    // the full explanation. These were present in processor_config.json
+    // but previously not decoded at all.
+    private let _minTiles: Int?
+    private let _maxImageTokens: Int?
 
     // Default values matching LFM2 VL models
     public var imageMean: [CGFloat] {
@@ -1335,6 +1342,8 @@ public struct LFM2VLProcessorConfiguration: Codable, Sendable {
     public var encoderPatchSize: Int { _encoderPatchSize ?? 16 }
     public var maxTiles: Int { _maxTiles ?? 10 }
     public var downsampleFactor: Int { _downsampleFactor ?? 2 }
+    public var minTiles: Int { _minTiles ?? 2 }
+    public var maxImageTokens: Int { _maxImageTokens ?? 256 }
 
     public var imageMeanTuple: (CGFloat, CGFloat, CGFloat) {
         (imageMean[0], imageMean[1], imageMean[2])
@@ -1350,5 +1359,7 @@ public struct LFM2VLProcessorConfiguration: Codable, Sendable {
         case _encoderPatchSize = "encoder_patch_size"
         case _maxTiles = "max_tiles"
         case _downsampleFactor = "downsample_factor"
+        case _minTiles = "min_tiles"
+        case _maxImageTokens = "max_image_tokens"
     }
 }
