@@ -2688,14 +2688,20 @@ public struct Gemma4Processor: UserInputProcessor {
     public func preprocess(images: [CIImage], processing: UserInput.Processing?) throws -> (
         MLXArray, THW
     ) {
-        var userProcessing = processing ?? UserInput.Processing()
         let targetSize = config.fixedSize
-        userProcessing.resize = targetSize
 
         let processedImages = images.map { image in
-            let processedImage = MediaProcessing.apply(image, processing: userProcessing)
-            let srgbImage = MediaProcessing.inSRGBToneCurveSpace(processedImage)
-            let resizedImage = MediaProcessing.resampleBicubic(srgbImage, to: targetSize)
+            // Fix (086): Gemma4 (nicht-unified) verlangt eine feste quadratische
+            // Eingabeauflösung. Ein direktes resampleBicubic(to: targetSize) streckt
+            // dabei nicht-quadratische Fotos verzerrend auf das Zielformat. Statt-
+            // dessen proportional in targetSize einpassen (bestFit erhält das
+            // Seitenverhältnis) und den Rest mit padToSquare auffüllen, analog zum
+            // Gemma4UnifiedProcessor-Pfad, der aspectRatioPreservingSize nutzt.
+            let srgbImage = MediaProcessing.inSRGBToneCurveSpace(image)
+            let fittedSize = MediaProcessing.bestFit(srgbImage.extent.size, in: targetSize)
+            let fittedImage = MediaProcessing.resampleBicubic(srgbImage, to: fittedSize)
+            let squaredImage = MediaProcessing.padToSquare(fittedImage)
+            let resizedImage = MediaProcessing.resampleBicubic(squaredImage, to: targetSize)
             let finalImage =
                 if config.doNormalize {
                     MediaProcessing.normalize(
